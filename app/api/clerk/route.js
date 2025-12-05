@@ -163,54 +163,59 @@
 import { Webhook } from "svix";
 import connectDB from "@/config/db";
 import User from "@/models/User";
-import { headers } from "next/headers";
 
-export const runtime = "edge";   // optional but recommended
+// Disable caching and static rendering
+export const dynamic = "force-dynamic";
+export const runtime = "nodejs";   // Required for crypto + svix
+export const preferredRegion = "auto";
 
 export async function POST(req) {
-  const wh = new Webhook(process.env.SIGNING_SECRET);
+    try {
+        const wh = new Webhook(process.env.SIGNING_SECRET);
 
-  // ✅ Correct way to read headers in App Router
-  const h = headers();
-  const svixHeaders = {
-    "svix-id": h.get("svix-id"),
-    "svix-timestamp": h.get("svix-timestamp"),
-    "svix-signature": h.get("svix-signature"),
-  };
+        // Read raw body (must be text, not JSON)
+        const body = await req.text();
 
-  // ❗ IMPORTANT: Use raw body
-  const body = await req.text();
+        // Read headers
+        const headerPayload = req.headers;
+        const svixHeaders = {
+            "svix-id": headerPayload.get("svix-id"),
+            "svix-timestamp": headerPayload.get("svix-timestamp"),
+            "svix-signature": headerPayload.get("svix-signature"),
+        };
 
-  let event;
-  try {
-    event = wh.verify(body, svixHeaders); // { data, type }
-  } catch (err) {
-    console.error("❌ Webhook verification error:", err);
-    return new Response("Invalid signature", { status: 400 });
-  }
+        // Verify webhook signature
+        const evt = wh.verify(body, svixHeaders);
+        const { data, type } = evt;
 
-  const { data, type } = event;
+        await connectDB();
 
-  const userData = {
-    _id: data.id,
-    email: data.email_addresses?.[0]?.email_address,
-    name: `${data.first_name || ""} ${data.last_name || ""}`.trim(),
-    image: data.image_url,
-  };
+        // Build user data
+        const userData = {
+            _id: data.id,
+            email: data.email_addresses?.[0]?.email_address || "",
+            name: `${data.first_name || ""} ${data.last_name || ""}`.trim(),
+            image: data.image_url || "",
+        };
 
-  await connectDB();
+        // Handle events
+        switch (type) {
+            case "user.created":
+                await User.create(userData);
+                break;
 
-  if (type === "user.created") {
-    await User.create(userData);
-  }
+            case "user.updated":
+                await User.findByIdAndUpdate(data.id, userData);
+                break;
 
-  if (type === "user.updated") {
-    await User.findByIdAndUpdate(data.id, userData);
-  }
+            case "user.deleted":
+                await User.findByIdAndDelete(data.id);
+                break;
+        }
 
-  if (type === "user.deleted") {
-    await User.findByIdAndDelete(data.id);
-  }
-
-  return new Response("OK", { status: 200 });
+        return Response.json({ success: true, type });
+    } catch (err) {
+        console.error("Webhook error:", err);
+        return new Response("Webhook Error", { status: 400 });
+    }
 }
