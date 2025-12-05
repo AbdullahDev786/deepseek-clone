@@ -107,54 +107,110 @@
 // }
 
 
+// also working bu deletioon webhook fails in production
+// import { Webhook } from "svix";
+// import connectDB from "@/config/db";
+// import User from "@/models/User";
+
+// export async function POST(req) {
+//     const wh = new Webhook(process.env.SIGNING_SECRET);
+
+//     const headerPayLoad = req.headers;
+//     const svixHeaders = {
+//         "svix-id": headerPayLoad.get("svix-id"),
+//         "svix-timestamp": headerPayLoad.get("svix-timestamp"),
+//         "svix-signature": headerPayLoad.get("svix-signature"),
+//     };
+
+//     const body = await req.text();
+
+//     let data, type;
+//     try {
+//         ({ data, type } = wh.verify(body, svixHeaders));
+//     } catch (err) {
+//         return new Response("Invalid signature", { status: 400 });
+//     }
+
+//     const userData = {
+//         _id: data.id,
+//         email: data.email_addresses[0].email_address,
+//         name: `${data.first_name ?? ""} ${data.last_name ?? ""}`.trim(),
+//         image: data.image_url,
+//     };
+
+//     await connectDB();
+
+//     switch (type) {
+//         case "user.created":
+//             await User.create(userData);
+//             break;
+
+//         case "user.updated":
+//             await User.findByIdAndUpdate(data.id, userData, { upsert: true });
+//             break;
+
+//         case "user.deleted":
+//             await User.findByIdAndDelete(data.id);
+//             break;
+//     }
+
+//     return new Response(JSON.stringify({ message: "Event Received" }), {
+//         status: 200,
+//     });
+// }
+
 
 import { Webhook } from "svix";
 import connectDB from "@/config/db";
 import User from "@/models/User";
+import { headers } from "next/headers";
+
+export const runtime = "edge";   // optional but recommended
 
 export async function POST(req) {
-    const wh = new Webhook(process.env.SIGNING_SECRET);
+  const wh = new Webhook(process.env.SIGNING_SECRET);
 
-    const headerPayLoad = req.headers;
-    const svixHeaders = {
-        "svix-id": headerPayLoad.get("svix-id"),
-        "svix-timestamp": headerPayLoad.get("svix-timestamp"),
-        "svix-signature": headerPayLoad.get("svix-signature"),
-    };
+  // ✅ Correct way to read headers in App Router
+  const h = headers();
+  const svixHeaders = {
+    "svix-id": h.get("svix-id"),
+    "svix-timestamp": h.get("svix-timestamp"),
+    "svix-signature": h.get("svix-signature"),
+  };
 
-    const body = await req.text();
+  // ❗ IMPORTANT: Use raw body
+  const body = await req.text();
 
-    let data, type;
-    try {
-        ({ data, type } = wh.verify(body, svixHeaders));
-    } catch (err) {
-        return new Response("Invalid signature", { status: 400 });
-    }
+  let event;
+  try {
+    event = wh.verify(body, svixHeaders); // { data, type }
+  } catch (err) {
+    console.error("❌ Webhook verification error:", err);
+    return new Response("Invalid signature", { status: 400 });
+  }
 
-    const userData = {
-        _id: data.id,
-        email: data.email_addresses[0].email_address,
-        name: `${data.first_name ?? ""} ${data.last_name ?? ""}`.trim(),
-        image: data.image_url,
-    };
+  const { data, type } = event;
 
-    await connectDB();
+  const userData = {
+    _id: data.id,
+    email: data.email_addresses?.[0]?.email_address,
+    name: `${data.first_name || ""} ${data.last_name || ""}`.trim(),
+    image: data.image_url,
+  };
 
-    switch (type) {
-        case "user.created":
-            await User.create(userData);
-            break;
+  await connectDB();
 
-        case "user.updated":
-            await User.findByIdAndUpdate(data.id, userData, { upsert: true });
-            break;
+  if (type === "user.created") {
+    await User.create(userData);
+  }
 
-        case "user.deleted":
-            await User.findByIdAndDelete(data.id);
-            break;
-    }
+  if (type === "user.updated") {
+    await User.findByIdAndUpdate(data.id, userData);
+  }
 
-    return new Response(JSON.stringify({ message: "Event Received" }), {
-        status: 200,
-    });
+  if (type === "user.deleted") {
+    await User.findByIdAndDelete(data.id);
+  }
+
+  return new Response("OK", { status: 200 });
 }
